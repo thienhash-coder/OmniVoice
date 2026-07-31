@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
 # ==========================================
 # 🛠 CẤU HÌNH GITHUB RELEASES
 # ==========================================
-APP_VERSION = "v2.0.0"
+APP_VERSION = "v2.0.1"
 
 # Thay bằng tên tài khoản và tên Repository của bạn trên Github
 GITHUB_OWNER = "thienhash-coder"  # VD: "nguyenvana"
@@ -24,12 +24,18 @@ GITHUB_REPO = "OmniVoice"        # VD: "OmniVoice-Cloud"
 # ==========================================
 
 class CheckUpdateWorker(QThread):
-    result_signal = pyqtSignal(str, bool, bool, str)
+    # Truyền về: Lời nhắn, Thành công hay không, Có bản mới không, Link tải, Tên phiên bản
+    result_signal = pyqtSignal(str, bool, bool, str, str)
+
+    def __init__(self, is_startup=False):
+        super().__init__()
+        self.is_startup = is_startup
 
     def run(self):
         try:
             if not GITHUB_OWNER or not GITHUB_REPO:
-                self.result_signal.emit("Chưa cấu hình tài khoản GitHub trong mã nguồn.", False, False, "")
+                if not self.is_startup:
+                    self.result_signal.emit("Chưa cấu hình tài khoản GitHub.", False, False, "", "")
                 return
                 
             api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
@@ -38,20 +44,55 @@ class CheckUpdateWorker(QThread):
             if response.status_code == 200:
                 data = response.json()
                 online_version = data.get("tag_name", "")
-                release_url = data.get("html_url", "")
+                
+                # Tìm link tải trực tiếp của file .exe trong mục Assets
+                download_url = data.get("html_url", "") # Mặc định là trang web
+                for asset in data.get("assets", []):
+                    if asset["name"].endswith(".exe"):
+                        download_url = asset["browser_download_url"]
+                        break
                 
                 if online_version and online_version.lower() != APP_VERSION.lower():
-                    msg = f"🎉 Đã tìm thấy phiên bản mới: {online_version}!\nPhiên bản hiện tại của bạn: {APP_VERSION}\n\nBạn có muốn mở GitHub để tải bản cập nhật mới không?"
-                    self.result_signal.emit(msg, True, True, release_url)
+                    msg = f"Có bản cập nhật mới ({online_version}). Bạn có muốn tải phiên bản mới nhất không?"
+                    self.result_signal.emit(msg, True, True, download_url, online_version)
                 else:
-                    self.result_signal.emit("✅ Phần mềm của bạn đang ở phiên bản mới nhất!", True, False, "")
-            elif response.status_code == 404:
-                self.result_signal.emit("❌ Không tìm thấy bản Release nào trên GitHub (Repository có thể đang ở chế độ Private hoặc chưa tạo Release).", False, False, "")
+                    if not self.is_startup:
+                        self.result_signal.emit("✅ Phần mềm của bạn đang ở phiên bản mới nhất!", True, False, "", "")
             else:
-                self.result_signal.emit(f"❌ Lỗi truy xuất GitHub API: {response.status_code}", False, False, "")
+                if not self.is_startup:
+                    self.result_signal.emit(f"❌ Lỗi truy xuất GitHub API: {response.status_code}", False, False, "", "")
         except Exception as e:
-            self.result_signal.emit(f"❌ Lỗi mạng khi kiểm tra cập nhật:\n{str(e)}", False, False, "")
+            if not self.is_startup:
+                self.result_signal.emit(f"❌ Lỗi mạng khi kiểm tra cập nhật:\n{str(e)}", False, False, "", "")
 
+class DownloadWorker(QThread):
+    progress_signal = pyqtSignal(int)
+    finished_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, url, save_path):
+        super().__init__()
+        self.url = url
+        self.save_path = save_path
+
+    def run(self):
+        try:
+            response = requests.get(self.url, stream=True, timeout=10)
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            
+            downloaded = 0
+            with open(self.save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            progress = int((downloaded / total_size) * 100)
+                            self.progress_signal.emit(progress)
+            self.finished_signal.emit(self.save_path)
+        except Exception as e:
+            self.error_signal.emit(str(e))
 class EngineInitWorker(QThread):
     success_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
@@ -191,6 +232,8 @@ class OmniVoiceMainWindow(QMainWindow):
         
         self.init_ui()
         self.apply_stylesheet()
+        # Thêm dòng này để tự kiểm tra bản cập nhật (ngầm) khi vừa mở app
+        self.run_check_update(is_startup=True)
 
     def init_ui(self):
         central_widget = QWidget()
@@ -485,27 +528,65 @@ class OmniVoiceMainWindow(QMainWindow):
         elif sender == self.btn_guide:
             self.content_stack.setCurrentIndex(3)
 
-    def run_check_update(self):
-        self.btn_check_update.setEnabled(False)
-        self.btn_check_update.setText("⏳ Đang kiểm tra trên GitHub...")
+    def run_check_update(self, is_startup=False):
+        if not is_startup:
+            self.btn_check_update.setEnabled(False)
+            self.btn_check_update.setText("⏳ Đang kiểm tra trên GitHub...")
         
-        self.update_worker = CheckUpdateWorker()
+        self.update_worker = CheckUpdateWorker(is_startup=is_startup)
         self.update_worker.result_signal.connect(self.on_update_finished)
         self.update_worker.start()
 
-    def on_update_finished(self, msg, is_success, has_new_version, release_url):
+    def on_update_finished(self, msg, is_success, has_new_version, download_url, online_version):
         self.btn_check_update.setEnabled(True)
         self.btn_check_update.setText("🔄 Kiểm Tra Bản Cập Nhật (GitHub)")
         
-        if has_new_version and release_url:
+        if has_new_version:
             reply = QMessageBox.question(self, "Có Bản Cập Nhật Mới", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
-                webbrowser.open(release_url)
-        else:
+                self.start_downloading_update(download_url, online_version)
+        elif not self.update_worker.is_startup:
             if is_success:
                 QMessageBox.information(self, "Cập nhật", msg)
             else:
                 QMessageBox.warning(self, "Thông báo", msg)
+
+    def start_downloading_update(self, url, version):
+        if not url.endswith(".exe"):
+            # Nếu GitHub không có file .exe, mở trình duyệt
+            webbrowser.open(url)
+            return
+            
+        # Lưu file mới ra ngay cùng thư mục chứa app hiện tại
+        current_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        save_path = os.path.join(current_dir, f"OmniVoice_Cloud_{version}.exe")
+        
+        self.progress_dialog = QProgressBar(self)
+        self.progress_dialog.setRange(0, 100)
+        self.progress_dialog.setWindowTitle("Đang tải bản cập nhật...")
+        self.progress_dialog.resize(400, 30)
+        self.progress_dialog.show()
+
+        self.btn_check_update.setText("⏳ Đang tải...")
+        self.btn_check_update.setEnabled(False)
+
+        self.download_worker = DownloadWorker(url, save_path)
+        self.download_worker.progress_signal.connect(self.progress_dialog.setValue)
+        self.download_worker.finished_signal.connect(self.on_download_success)
+        self.download_worker.error_signal.connect(self.on_download_error)
+        self.download_worker.start()
+
+    def on_download_success(self, save_path):
+        self.progress_dialog.hide()
+        self.btn_check_update.setText("🔄 Kiểm Tra Bản Cập Nhật (GitHub)")
+        self.btn_check_update.setEnabled(True)
+        QMessageBox.information(self, "Tải thành công", f"Đã tải phiên bản mới thành công!\n\nFile được lưu tại:\n{save_path}\n\nHãy tắt phần mềm cũ và chạy file mới nhé.")
+
+    def on_download_error(self, err_msg):
+        self.progress_dialog.hide()
+        self.btn_check_update.setText("🔄 Kiểm Tra Bản Cập Nhật (GitHub)")
+        self.btn_check_update.setEnabled(True)
+        QMessageBox.critical(self, "Lỗi tải xuống", f"Không thể tải bản cập nhật:\n{err_msg}")
 
     def browse_txt_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Chọn File TXT", "", "Text Files (*.txt);;All Files (*.*)")
