@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
 # ==========================================
 # 🛠 CẤU HÌNH GITHUB RELEASES
 # ==========================================
-APP_VERSION = "v2.0.1"
+APP_VERSION = "v3.0.0"
 
 # Thay bằng tên tài khoản và tên Repository của bạn trên Github
 GITHUB_OWNER = "thienhash-coder"  # VD: "nguyenvana"
@@ -24,12 +24,21 @@ GITHUB_REPO = "OmniVoice"        # VD: "OmniVoice-Cloud"
 # ==========================================
 
 class CheckUpdateWorker(QThread):
-    # Truyền về: Lời nhắn, Thành công hay không, Có bản mới không, Link tải, Tên phiên bản
     result_signal = pyqtSignal(str, bool, bool, str, str)
 
     def __init__(self, is_startup=False):
         super().__init__()
         self.is_startup = is_startup
+
+    # Thêm hàm lọc và chuẩn hóa phiên bản
+    def parse_version(self, version_str):
+        try:
+            # Xóa khoảng trắng và cắt bỏ chữ 'v' (nếu có)
+            clean_str = version_str.lower().replace('v', '').strip()
+            # Tách các số và chuyển thành dạng tuple toán học. VD: "1.0.1" -> (1, 0, 1)
+            return tuple(int(x) for x in clean_str.split('.') if x.isdigit())
+        except:
+            return (0, 0, 0) # Trả về 0 nếu định dạng lỗi
 
     def run(self):
         try:
@@ -45,19 +54,25 @@ class CheckUpdateWorker(QThread):
                 data = response.json()
                 online_version = data.get("tag_name", "")
                 
-                # Tìm link tải trực tiếp của file .exe trong mục Assets
-                download_url = data.get("html_url", "") # Mặc định là trang web
+                # Tìm link tải file .exe
+                download_url = data.get("html_url", "")
                 for asset in data.get("assets", []):
                     if asset["name"].endswith(".exe"):
                         download_url = asset["browser_download_url"]
                         break
                 
-                if online_version and online_version.lower() != APP_VERSION.lower():
-                    msg = f"Có bản cập nhật mới ({online_version}). Bạn có muốn tải phiên bản mới nhất không?"
-                    self.result_signal.emit(msg, True, True, download_url, online_version)
-                else:
-                    if not self.is_startup:
-                        self.result_signal.emit("✅ Phần mềm của bạn đang ở phiên bản mới nhất!", True, False, "", "")
+                if online_version:
+                    # Chuyển đổi để so sánh chuẩn xác
+                    v_online = self.parse_version(online_version)
+                    v_local = self.parse_version(APP_VERSION)
+                    
+                    # So sánh toán học: Nếu bản trên mạng (v_online) LỚN HƠN bản trong máy (v_local)
+                    if v_online > v_local:
+                        msg = f"Có bản cập nhật mới ({online_version}). Bạn có muốn tải phiên bản mới nhất không?"
+                        self.result_signal.emit(msg, True, True, download_url, online_version)
+                    else:
+                        if not self.is_startup:
+                            self.result_signal.emit("✅ Phần mềm của bạn đang ở phiên bản mới nhất!", True, False, "", "")
             else:
                 if not self.is_startup:
                     self.result_signal.emit(f"❌ Lỗi truy xuất GitHub API: {response.status_code}", False, False, "", "")
@@ -810,7 +825,32 @@ class OmniVoiceMainWindow(QMainWindow):
         #GuideBox { background-color: #181825; border: 1px solid #f38ba8; border-radius: 10px; padding: 15px; margin-top: 15px; }
         QProgressBar { border: 1px solid #313244; border-radius: 9px; text-align: center; color: #11111b; background-color: #181825; height: 18px; font-weight: 800; font-size: 10px; }
         QProgressBar::chunk { background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #a6e3a1, stop:1 #89b4fa); border-radius: 8px; }
+        /* ========================================= */
+        /* TÙY CHỈNH POPUP THÔNG BÁO (QMessageBox)   */
+        /* ========================================= */
+        QMessageBox {
+            background-color: #181825;
+            border: 1px solid #313244;
+        }
+        QMessageBox QLabel {
+            color: #cdd6f4; /* Màu chữ sáng rõ trên nền tối */
+            font-size: 14px;
+            background: transparent;
+        }
+        QMessageBox QPushButton {
+            background-color: #89b4fa; /* Màu xanh nước biển cho nút OK/Yes */
+            color: #11111b;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 25px;
+            font-weight: bold;
+            min-width: 80px;
+        }
+        QMessageBox QPushButton:hover {
+            background-color: #b4befe;
+        }
         """
+
         self.setStyleSheet(style)
 
 if __name__ == "__main__":
